@@ -10,6 +10,7 @@ import SimpleITK as sitk
 from Model import losses
 from Model.config import args
 from Model.model import U_Network, SpatialTransformer
+from Model.boids import BoidsRegister
 
 
 def make_dirs():
@@ -55,18 +56,24 @@ def test():
 
     # Prepare the vm1 or vm2 model and send to device
     nf_enc = [16, 32, 32, 32]
-    if args.model == "vm1":
-        nf_dec = [32, 32, 32, 32, 8, 8]
+    if args.use_boids:
+        model = BoidsRegister(vol_size, steps=args.boids_steps).to(device)
+        model.load_state_dict(torch.load(args.checkpoint_path))
+        model.eval()
+        STN_label = SpatialTransformer(vol_size, mode="nearest").to(device)
+        STN_label.eval()
     else:
-        nf_dec = [32, 32, 32, 32, 32, 16, 16]
-    # Set up model
-    UNet = U_Network(len(vol_size), nf_enc, nf_dec).to(device)
-    UNet.load_state_dict(torch.load(args.checkpoint_path))
-    STN_img = SpatialTransformer(vol_size).to(device)
-    STN_label = SpatialTransformer(vol_size, mode="nearest").to(device)
-    UNet.eval()
-    STN_img.eval()
-    STN_label.eval()
+        if args.model == "vm1":
+            nf_dec = [32, 32, 32, 32, 8, 8]
+        else:
+            nf_dec = [32, 32, 32, 32, 32, 16, 16]
+        model = U_Network(len(vol_size), nf_enc, nf_dec).to(device)
+        model.load_state_dict(torch.load(args.checkpoint_path))
+        STN_img = SpatialTransformer(vol_size).to(device)
+        STN_label = SpatialTransformer(vol_size, mode="nearest").to(device)
+        model.eval()
+        STN_img.eval()
+        STN_label.eval()
 
     DSC = []
     # fixed图像对应的label
@@ -82,8 +89,11 @@ def test():
         input_label = torch.from_numpy(input_label).to(device).float()
 
         # 获得配准后的图像和label
-        pred_flow = UNet(input_moving, input_fixed)
-        pred_img = STN_img(input_moving, pred_flow)
+        if args.use_boids:
+            pred_img, pred_flow = model(input_moving, input_fixed)
+        else:
+            pred_flow = model(input_moving, input_fixed)
+            pred_img = STN_img(input_moving, pred_flow)
         pred_label = STN_label(input_label, pred_flow)
 
         # 计算DSC

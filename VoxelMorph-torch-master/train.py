@@ -13,6 +13,7 @@ from Model import losses
 from Model.config import args
 from Model.datagenerators import Dataset
 from Model.model import U_Network, SpatialTransformer
+from Model.boids import BoidsRegister
 
 
 def count_parameters(model):
@@ -56,22 +57,26 @@ def train():
     input_fixed = np.repeat(input_fixed, args.batch_size, axis=0)
     input_fixed = torch.from_numpy(input_fixed).to(device).float()
 
-    # 创建配准网络（UNet）和STN
+    # 创建配准网络
     nf_enc = [16, 32, 32, 32]
-    if args.model == "vm1":
-        nf_dec = [32, 32, 32, 32, 8, 8]
+    if args.use_boids:
+        reg_model = BoidsRegister(vol_size, steps=args.boids_steps).to(device)
+        reg_model.train()
+        print("BoidsRegister: ", count_parameters(reg_model))
     else:
-        nf_dec = [32, 32, 32, 32, 32, 16, 16]
-    UNet = U_Network(len(vol_size), nf_enc, nf_dec).to(device)
-    STN = SpatialTransformer(vol_size).to(device)
-    UNet.train()
-    STN.train()
-    # 模型参数个数
-    print("UNet: ", count_parameters(UNet))
-    print("STN: ", count_parameters(STN))
+        if args.model == "vm1":
+            nf_dec = [32, 32, 32, 32, 8, 8]
+        else:
+            nf_dec = [32, 32, 32, 32, 32, 16, 16]
+        reg_model = U_Network(len(vol_size), nf_enc, nf_dec).to(device)
+        stn = SpatialTransformer(vol_size).to(device)
+        reg_model.train()
+        stn.train()
+        print("UNet: ", count_parameters(reg_model))
+        print("STN: ", count_parameters(stn))
 
     # Set optimizer and losses
-    opt = Adam(UNet.parameters(), lr=args.lr)
+    opt = Adam(reg_model.parameters(), lr=args.lr)
     sim_loss_fn = losses.ncc_loss if args.sim_loss == "ncc" else losses.mse_loss
     grad_loss_fn = losses.gradient_loss
 
@@ -94,8 +99,11 @@ def train():
         input_moving = input_moving.to(device).float()
 
         # Run the data through the model to produce warp and flow field
-        flow_m2f = UNet(input_moving, input_fixed)
-        m2f = STN(input_moving, flow_m2f)
+        if args.use_boids:
+            m2f, flow_m2f = reg_model(input_moving, input_fixed)
+        else:
+            flow_m2f = reg_model(input_moving, input_fixed)
+            m2f = stn(input_moving, flow_m2f)
 
         # Calculate loss
         sim_loss = sim_loss_fn(m2f, input_fixed)
@@ -112,7 +120,7 @@ def train():
         if i % args.n_save_iter == 0:
             # Save model checkpoint
             save_file_name = os.path.join(args.model_dir, '%d.pth' % i)
-            torch.save(UNet.state_dict(), save_file_name)
+            torch.save(reg_model.state_dict(), save_file_name)
             # Save images
             m_name = str(i) + "_m.nii.gz"
             m2f_name = str(i) + "_m2f.nii.gz"
